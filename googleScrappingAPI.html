@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Engineering Companies Scraper - Grid Search</title>
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            font-family: Arial;
+        }
+
+        .container {
+            display: flex;
+            height: 100%;
+        }
+
+        #map {
+            height: 100%;
+            width: 50%;
+        }
+
+        #results {
+            width: 50%;
+            overflow-y: auto;
+            padding: 20px;
+        }
+
+        .company-card {
+            margin: 10px 0;
+            padding: 15px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+
+        .controls {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            z-index: 1000;
+            background: white;
+            padding: 10px;
+            border-radius: 4px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+
+        button {
+            margin: 5px;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        #status {
+            margin-left: 10px;
+            font-weight: bold;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background-color: #f0f0f0;
+            border-radius: 10px;
+            margin-top: 10px;
+            overflow: hidden;
+        }
+
+        .progress {
+            width: 0%;
+            height: 100%;
+            background-color: #4CAF50;
+            transition: width 0.3s ease;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="controls">
+        <button id="searchBtn" onclick="startGridSearch()">Buscar em São Paulo</button>
+        <button id="exportBtn" onclick="exportToCSV()">Exportar CSV</button>
+        <span id="status"></span>
+        <div class="progress-bar">
+            <div id="progress" class="progress"></div>
+        </div>
+    </div>
+    <div class="container">
+        <div id="map"></div>
+        <div id="results"></div>
+    </div>
+
+    <script>
+        let map, service;
+        let companies = [];
+        let searchGrid = [];
+        let currentGridIndex = 0;
+        let searching = false;
+
+        // Limites aproximados de São Paulo
+        const SP_BOUNDS = {
+            north: -23.356792,
+            south: -24.008814,
+            east: -46.365090,
+            west: -46.826016
+        };
+
+        // Configuração da grade
+        const GRID_SIZE = 0.01; // Aproximadamente 1km
+
+        function initMap() {
+            map = new google.maps.Map(document.getElementById('map'), {
+                center: { lat: -23.550520, lng: -46.633308 },
+                zoom: 11
+            });
+            service = new google.maps.places.PlacesService(map);
+            generateSearchGrid();
+        }
+
+        function generateSearchGrid() {
+            searchGrid = [];
+            for (let lat = SP_BOUNDS.south; lat <= SP_BOUNDS.north; lat += GRID_SIZE) {
+                for (let lng = SP_BOUNDS.west; lng <= SP_BOUNDS.east; lng += GRID_SIZE) {
+                    searchGrid.push({
+                        center: { lat, lng },
+                        bounds: {
+                            north: lat + GRID_SIZE/2,
+                            south: lat - GRID_SIZE/2,
+                            east: lng + GRID_SIZE/2,
+                            west: lng - GRID_SIZE/2
+                        }
+                    });
+                }
+            }
+        }
+
+        async function startGridSearch() {
+            if (searching) return;
+            
+            const btn = document.getElementById('searchBtn');
+            const status = document.getElementById('status');
+            const progress = document.getElementById('progress');
+            
+            searching = true;
+            companies = [];
+            currentGridIndex = 0;
+            btn.disabled = true;
+            
+            try {
+                const totalCells = searchGrid.length;
+                
+                for (let i = 0; i < searchGrid.length; i++) {
+                    status.textContent = `Buscando região ${i + 1} de ${totalCells}...`;
+                    progress.style.width = `${((i + 1) / totalCells) * 100}%`;
+                    
+                    await searchInGrid(searchGrid[i]);
+                    // Pausa entre buscas para evitar limites de taxa
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+                
+                status.textContent = `Busca completa: ${companies.length} empresas encontradas`;
+                displayResults();
+                
+            } catch (error) {
+                console.error("Erro na busca:", error);
+                status.textContent = "Erro ao realizar a busca";
+            } finally {
+                searching = false;
+                btn.disabled = false;
+            }
+        }
+
+        async function searchInGrid(gridCell) {
+            const { Place } = await google.maps.importLibrary("places");
+            
+            const request = {
+                textQuery: "engenharia",
+                fields: ["displayName", "formattedAddress", "location", "businessStatus", "id"],
+                locationBias: {
+                    north: gridCell.bounds.north,
+                    south: gridCell.bounds.south,
+                    east: gridCell.bounds.east,
+                    west: gridCell.bounds.west
+                },
+                maxResultCount: 20
+            };
+
+            try {
+                const { places } = await Place.searchByText(request);
+                
+                // Visualização da área de busca no mapa
+                new google.maps.Rectangle({
+                    map: map,
+                    bounds: gridCell.bounds,
+                    fillColor: "#FF0000",
+                    fillOpacity: 0.1,
+                    strokeWeight: 1
+                });
+
+                // Obter detalhes de cada lugar
+                for (const place of places) {
+                    await getPlaceDetails(place.id);
+                    await new Promise(resolve => setTimeout(resolve, 300));
+                }
+            } catch (error) {
+                console.warn(`Erro na busca da grade ${currentGridIndex}:`, error);
+            }
+        }
+
+        function getPlaceDetails(placeId) {
+            return new Promise((resolve, reject) => {
+                const request = {
+                    placeId: placeId,
+                    fields: [
+                        'name',
+                        'formatted_address',
+                        'formatted_phone_number',
+                        'international_phone_number',
+                        'website',
+                        'url',
+                        'types',
+                        'business_status',
+                        'geometry',
+                        'rating',
+                        'user_ratings_total',
+                        'opening_hours',
+                        'reviews',
+                        'photos'
+                    ]
+                };
+
+                service.getDetails(request, (place, status) => {
+                    if (status === google.maps.places.PlacesServiceStatus.OK) {
+                        addCompany(place);
+                        resolve(place);
+                    } else {
+                        console.warn(`Erro ao obter detalhes para ${placeId}:`, status);
+                        resolve(null);
+                    }
+                });
+            });
+        }
+
+        function addCompany(place) {
+            // Verificar se a empresa já existe na lista
+            const exists = companies.some(c => c.maps_url === place.url);
+            if (exists) return;
+
+            const company = {
+                nome: place.name || '',
+                endereco: place.formatted_address || '',
+                telefone: place.formatted_phone_number || '',
+                telefone_internacional: place.international_phone_number || '',
+                website: place.website || '',
+                maps_url: place.url || '',
+                tipo: (place.types || []).join(', '),
+                status: place.business_status || '',
+                lat: place.geometry?.location.lat() || '',
+                lng: place.geometry?.location.lng() || '',
+                avaliacao: place.rating || '',
+                total_avaliacoes: place.user_ratings_total || '',
+                horario_funcionamento: place.opening_hours?.weekday_text?.join('; ') || '',
+                fotos_urls: place.photos?.slice(0, 5).map(photo => photo.getUrl({maxWidth: 500, maxHeight: 500})) || [],
+                avaliacoes: place.reviews?.slice(0, 3).map(review => ({
+                    texto: review.text,
+                    nota: review.rating,
+                    autor: review.author_name,
+                    data: review.relative_time_description
+                })) || []
+            };
+
+            new google.maps.Marker({
+                map,
+                position: place.geometry.location,
+                title: place.name
+            });
+
+            companies.push(company);
+            
+            // Atualizar resultados em tempo real
+            if (companies.length % 5 === 0) {
+                displayResults();
+            }
+        }
+
+        function displayResults() {
+            const container = document.getElementById('results');
+            container.innerHTML = `<h2>Total de empresas encontradas: ${companies.length}</h2>`;
+
+            companies.forEach(company => {
+                const div = document.createElement('div');
+                div.className = 'company-card';
+                div.innerHTML = `
+                    <h3>${company.nome}</h3>
+                    <p><strong>Endereço:</strong> ${company.endereco}</p>
+                    <p><strong>Telefone:</strong> ${company.telefone}</p>
+                    <p><strong>Website:</strong> <a href="${company.website}" target="_blank">${company.website}</a></p>
+                    <p><strong>Google Maps:</strong> <a href="${company.maps_url}" target="_blank">Ver no Maps</a></p>
+                    <p><strong>Avaliação:</strong> ${company.avaliacao} (${company.total_avaliacoes} avaliações)</p>
+                    <p><strong>Horário de Funcionamento:</strong> ${company.horario_funcionamento}</p>
+                `;
+                container.appendChild(div);
+            });
+        }
+
+        function exportToCSV() {
+            if (!companies.length) {
+                alert('Nenhuma empresa encontrada');
+                return;
+            }
+
+            const headers = [
+                'Nome',
+                'Endereço',
+                'Telefone',
+                'Telefone Internacional',
+                'Website',
+                'URL Google Maps',
+                'Tipo',
+                'Status',
+                'Latitude',
+                'Longitude',
+                'Avaliação',
+                'Total de Avaliações',
+                'Horário de Funcionamento',
+                'URLs das Fotos',
+                'Avaliações'
+            ];
+
+            const rows = companies.map(c => [
+                c.nome,
+                c.endereco,
+                c.telefone,
+                c.telefone_internacional,
+                c.website,
+                c.maps_url,
+                c.tipo,
+                c.status,
+                c.lat,
+                c.lng,
+                c.avaliacao,
+                c.total_avaliacoes,
+                c.horario_funcionamento,
+                c.fotos_urls.join(' | '),
+                JSON.stringify(c.avaliacoes)
+            ].map(field => `"${(field || '').toString().replace(/"/g, '""')}"`));
+
+            const csv = [headers, ...rows].map(row => row.join(',')).join('\n');
+            const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = 'empresas_engenharia.csv';
+            link.click();
+        }
+    </script>
+
+    <script>
+        const API_KEY = 'AIzaSyD2lu6gysJHEELOEBTvfaNpoeZXWgllvlo'; // Substituir pela chave de API Google
+        const script = document.createElement('script');
+        
+        script.src = `https://maps.googleapis.com/maps/api/js?key=${API_KEY}&loading=async&libraries=places&callback=initMap`;
+        script.async = true;
+        document.head.appendChild(script);
+    </script>
+</body>
+</html>
